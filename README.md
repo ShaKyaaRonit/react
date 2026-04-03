@@ -1,6 +1,6 @@
 # Momentum Board
 
-Momentum Board is a portfolio-ready todo list app built with React, TypeScript, and Vite. It keeps the feature set easy to understand while still showing the kind of UI polish and state management that looks strong in a GitHub portfolio.
+Momentum Board is a todo list app built with React, TypeScript, and Vite. It keeps the feature set easy to understand.
 
 ## Features
 
