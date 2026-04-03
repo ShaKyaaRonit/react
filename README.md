@@ -29,7 +29,3 @@ npm run dev
 ```bash
 npm run build
 ```
-
-## Why It Works Well In A Portfolio
-
-This project is simple enough to explain quickly, but it still demonstrates component structure, form handling, derived state, local persistence, filtering logic, and responsive UI styling in one clean example.
