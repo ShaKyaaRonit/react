@@ -51,6 +51,12 @@ const TITLE_LIMIT = 80
 const DETAILS_LIMIT = 240
 const CATEGORY_LIMIT = 28
 const DUE_SOON_WINDOW = 3
+const LEGACY_DEMO_TASK_IDS = new Set([
+  'task-q2-launch',
+  'task-onboarding',
+  'task-incidents',
+  'task-vendor',
+])
 
 const emptyForm: TaskForm = {
   title: '',
@@ -59,53 +65,6 @@ const emptyForm: TaskForm = {
   dueDate: '',
   priority: 'Medium',
 }
-
-const starterTasks: Task[] = [
-  {
-    id: 'task-q2-launch',
-    title: 'Approve the Q2 launch readiness checklist',
-    details:
-      'Review design QA, final release notes, and rollout timing before the product update ships.',
-    category: 'Launch',
-    dueDate: '2026-04-05',
-    priority: 'High',
-    completed: false,
-    createdAt: '2026-04-01T08:30:00.000Z',
-  },
-  {
-    id: 'task-onboarding',
-    title: 'Tighten the onboarding email sequence',
-    details:
-      'Shorten the first three messages and add a stronger CTA for the setup milestone.',
-    category: 'Growth',
-    dueDate: '2026-04-09',
-    priority: 'Medium',
-    completed: false,
-    createdAt: '2026-04-01T10:00:00.000Z',
-  },
-  {
-    id: 'task-incidents',
-    title: 'Document follow-up actions from the reliability retro',
-    details:
-      'Capture owners, deadlines, and the monitoring changes agreed in the incident review.',
-    category: 'Operations',
-    dueDate: '',
-    priority: 'Low',
-    completed: false,
-    createdAt: '2026-04-02T12:45:00.000Z',
-  },
-  {
-    id: 'task-vendor',
-    title: 'Confirm legal approval for the analytics vendor renewal',
-    details:
-      'Finalize procurement sign-off and send the renewal note to finance before Friday.',
-    category: 'Finance',
-    dueDate: '2026-04-02',
-    priority: 'High',
-    completed: true,
-    createdAt: '2026-03-31T16:20:00.000Z',
-  },
-]
 
 const statusOptions: Array<{ value: StatusFilter; label: string }> = [
   { value: 'all', label: 'All tasks' },
@@ -164,26 +123,26 @@ function isTask(value: unknown): value is Task {
 
 function readStoredTasks(): Task[] {
   if (typeof window === 'undefined') {
-    return starterTasks
+    return []
   }
 
   try {
     const storedTasks = window.localStorage.getItem(STORAGE_KEY)
 
     if (!storedTasks) {
-      return starterTasks
+      return []
     }
 
     const parsed = JSON.parse(storedTasks) as unknown
 
     if (Array.isArray(parsed) && parsed.every(isTask)) {
-      return parsed
+      return parsed.filter((task) => !LEGACY_DEMO_TASK_IDS.has(task.id))
     }
   } catch {
-    return starterTasks
+    return []
   }
 
-  return starterTasks
+  return []
 }
 
 function parseDate(date: string) {
@@ -541,7 +500,7 @@ function App() {
 
   const boardSummary =
     tasks.length === 0
-      ? 'The board is empty. Add a task or load the demo data.'
+      ? 'No tasks yet. Create the first task to start the board.'
       : visibleTasks.length === tasks.length
         ? `Showing all ${tasks.length} ${pluralize('task', tasks.length)}.`
         : `Showing ${visibleTasks.length} of ${tasks.length} ${pluralize(
@@ -563,7 +522,7 @@ function App() {
   const saveLabel = isStorageAvailable
     ? lastSavedAt
       ? `Saved locally at ${formatSavedTime(lastSavedAt)}`
-      : 'Local-first persistence'
+      : 'Ready to save locally'
     : 'Local storage unavailable'
 
   function updateFormField<Key extends keyof TaskForm>(
@@ -723,12 +682,6 @@ function App() {
     setSortOption('smart')
   }
 
-  function handleLoadStarterTasks() {
-    persistTasks(starterTasks)
-    handleResetView()
-    resetForm()
-  }
-
   function handleStartNewTask() {
     resetForm()
     scrollComposerIntoView()
@@ -749,13 +702,13 @@ function App() {
           </span>
         </div>
 
-        <p className="section-label">Delivery command center</p>
+        <p className="section-label">Operations overview</p>
         <h1 className="overview-title">
           Professional task management without the clutter.
         </h1>
         <p className="overview-copy">
           Keep priorities visible, deadlines actionable, and progress easy to
-          review in a calm, local-first workflow.
+          review in a calm, focused workflow.
         </p>
 
         <div className="overview-meta">
@@ -1018,7 +971,7 @@ function App() {
                 <p className="editing-pill">
                   {editingTask
                     ? `Editing: ${editingTask.title}`
-                    : 'New tasks appear instantly in the board below.'}
+                    : 'Create a task to populate the board.'}
                 </p>
               </div>
 
@@ -1148,15 +1101,6 @@ function App() {
                 {activeViewCount === 1 ? '' : 's'}
               </span>
             ) : null}
-            {tasks.length === 0 ? (
-              <button
-                type="button"
-                className="text-button"
-                onClick={handleLoadStarterTasks}
-              >
-                Load demo tasks
-              </button>
-            ) : null}
           </div>
         </section>
 
@@ -1198,34 +1142,29 @@ function App() {
           ) : (
             <div className="empty-state">
               <p className="empty-state__eyebrow">
-                {tasks.length === 0 ? 'Nothing here yet' : 'No matching tasks'}
+                {tasks.length === 0 ? 'No tasks yet' : 'No matching tasks'}
               </p>
               <h3>
                 {tasks.length === 0
-                  ? 'Start with a clean, prioritized board.'
+                  ? 'Create the first task for your workspace.'
                   : 'Try a broader search or reset the board view.'}
               </h3>
               <p>
                 {tasks.length === 0
-                  ? 'Create your first task or load the demo data to explore the polished workflow.'
+                  ? 'Start with a clear title, priority, and due date to build a reliable operational board.'
                   : 'The current combination of search, filters, and sort order is hiding every task.'}
               </p>
               <div className="button-row">
-                {tasks.length === 0 ? (
-                  <button
-                    type="button"
-                    className="button button--primary"
-                    onClick={handleLoadStarterTasks}
-                  >
-                    Load demo tasks
-                  </button>
-                ) : null}
                 <button
                   type="button"
-                  className="button button--secondary"
+                  className={`button ${
+                    tasks.length === 0
+                      ? 'button--primary'
+                      : 'button--secondary'
+                  }`}
                   onClick={hasActiveView ? handleResetView : handleStartNewTask}
                 >
-                  {hasActiveView ? 'Reset view' : 'Create a task'}
+                  {hasActiveView && tasks.length > 0 ? 'Reset view' : 'Create a task'}
                 </button>
               </div>
             </div>
