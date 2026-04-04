@@ -1,381 +1,286 @@
-import { useDeferredValue, useEffect, useId, useRef, useState } from 'react'
-import type { FormEvent } from 'react'
+import { startTransition, useDeferredValue, useEffect, useState } from 'react'
+import type { CSSProperties, FormEvent } from 'react'
 import './App.css'
+import nyraLogo from './assets/nyra-logo.png'
+import {
+  checkoutSteps,
+  departments,
+  editorialCollections,
+  footerColumns,
+  navigationLinks,
+  products,
+  serviceHighlights,
+  trendingSearches,
+  type DepartmentId,
+  type Product,
+} from './storefront'
 
-type Priority = 'Low' | 'Medium' | 'High'
-type StatusFilter = 'all' | 'active' | 'completed'
-type PriorityFilter = 'all' | Priority
-type SortOption = 'smart' | 'due' | 'recent' | 'priority'
-type DueTone = 'complete' | 'overdue' | 'today' | 'upcoming'
-
-type Task = {
-  id: string
-  title: string
-  details: string
-  category: string
-  dueDate: string
-  priority: Priority
-  completed: boolean
-  createdAt: string
+type DepartmentFilter = DepartmentId | 'all'
+type SortOption = 'featured' | 'price-low' | 'price-high' | 'rating' | 'deal'
+type BagRecord = Record<string, number>
+type BagLine = {
+  product: Product
+  quantity: number
 }
 
-type TaskForm = {
-  title: string
-  details: string
-  category: string
-  dueDate: string
-  priority: Priority
+type ProductArtProps = {
+  product: Product
+  variant?: 'card' | 'showcase'
 }
 
-type StatCardProps = {
+type ProductCardProps = {
+  product: Product
+  departmentLabel: string
+  isSelected: boolean
+  onSelect: (productId: string) => void
+  onAddToBag: (productId: string) => void
+}
+
+const BAG_STORAGE_KEY = 'nyra-jewellery.bag.v1'
+const FREE_INSURED_SHIPPING_THRESHOLD = 15_000
+const STANDARD_INSURED_SHIPPING = 350
+
+const priceFormatter = new Intl.NumberFormat('en-NP', {
+  style: 'currency',
+  currency: 'NPR',
+  maximumFractionDigits: 0,
+})
+
+const departmentMap = new Map(departments.map((department) => [department.id, department]))
+
+const departmentFilters: Array<{
+  id: DepartmentFilter
   label: string
-  value: string | number
-  copy: string
-}
-
-type FilterPillProps = {
-  label: string
-  isActive: boolean
-  onClick: () => void
-}
-
-type TaskCardProps = {
-  task: Task
-  onToggle: (taskId: string) => void
-  onEdit: (task: Task) => void
-  onDelete: (task: Task) => void
-}
-
-const STORAGE_KEY = 'momentum-board.tasks.v1'
-const TITLE_LIMIT = 80
-const DETAILS_LIMIT = 240
-const CATEGORY_LIMIT = 28
-const DUE_SOON_WINDOW = 3
-const LEGACY_DEMO_TASK_IDS = new Set([
-  'task-q2-launch',
-  'task-onboarding',
-  'task-incidents',
-  'task-vendor',
-])
-
-const emptyForm: TaskForm = {
-  title: '',
-  details: '',
-  category: 'Operations',
-  dueDate: '',
-  priority: 'Medium',
-}
-
-const statusOptions: Array<{ value: StatusFilter; label: string }> = [
-  { value: 'all', label: 'All tasks' },
-  { value: 'active', label: 'Active' },
-  { value: 'completed', label: 'Completed' },
-]
-
-const priorityOptions: Array<{ value: PriorityFilter; label: string }> = [
-  { value: 'all', label: 'Any priority' },
-  { value: 'High', label: 'High' },
-  { value: 'Medium', label: 'Medium' },
-  { value: 'Low', label: 'Low' },
+  blurb: string
+}> = [
+  {
+    id: 'all',
+    label: 'All collections',
+    blurb: 'Browse Nyra across gold, silver, diamond, bridal, heritage, gifting, and everyday Nepali jewellery.',
+  },
+  ...departments.map((department) => ({
+    id: department.id,
+    label: department.label,
+    blurb: department.blurb,
+  })),
 ]
 
 const sortOptions: Array<{ value: SortOption; label: string }> = [
-  { value: 'smart', label: 'Smart order' },
-  { value: 'due', label: 'Nearest due date' },
-  { value: 'priority', label: 'Priority first' },
-  { value: 'recent', label: 'Most recent' },
+  { value: 'featured', label: 'Curated first' },
+  { value: 'deal', label: 'Best offers' },
+  { value: 'rating', label: 'Highest rated' },
+  { value: 'price-low', label: 'Price: low to high' },
+  { value: 'price-high', label: 'Price: high to low' },
 ]
 
-const priorityRank: Record<Priority, number> = {
-  High: 0,
-  Medium: 1,
-  Low: 2,
-}
-
-const priorityBadgeCopy: Record<Priority, string> = {
-  High: 'High priority',
-  Medium: 'Medium priority',
-  Low: 'Low priority',
-}
-
-function isPriority(value: unknown): value is Priority {
-  return value === 'Low' || value === 'Medium' || value === 'High'
-}
-
-function isTask(value: unknown): value is Task {
+function isBagRecord(value: unknown): value is BagRecord {
   if (typeof value !== 'object' || value === null) {
     return false
   }
 
-  const candidate = value as Record<string, unknown>
-
-  return (
-    typeof candidate.id === 'string' &&
-    typeof candidate.title === 'string' &&
-    typeof candidate.details === 'string' &&
-    typeof candidate.category === 'string' &&
-    typeof candidate.dueDate === 'string' &&
-    typeof candidate.completed === 'boolean' &&
-    typeof candidate.createdAt === 'string' &&
-    isPriority(candidate.priority)
+  return Object.values(value as Record<string, unknown>).every(
+    (entry) => typeof entry === 'number' && Number.isFinite(entry) && entry >= 0,
   )
 }
 
-function readStoredTasks(): Task[] {
+function readStoredBag(): BagRecord {
   if (typeof window === 'undefined') {
-    return []
+    return {}
   }
 
   try {
-    const storedTasks = window.localStorage.getItem(STORAGE_KEY)
+    const storedBag = window.localStorage.getItem(BAG_STORAGE_KEY)
 
-    if (!storedTasks) {
-      return []
+    if (!storedBag) {
+      return {}
     }
 
-    const parsed = JSON.parse(storedTasks) as unknown
+    const parsed = JSON.parse(storedBag) as unknown
 
-    if (Array.isArray(parsed) && parsed.every(isTask)) {
-      return parsed.filter((task) => !LEGACY_DEMO_TASK_IDS.has(task.id))
+    if (isBagRecord(parsed)) {
+      return parsed
     }
   } catch {
-    return []
+    return {}
   }
 
-  return []
+  return {}
 }
 
-function parseDate(date: string) {
-  return new Date(`${date}T00:00:00`)
+function formatPrice(value: number) {
+  return priceFormatter.format(value)
 }
 
-function formatDate(date: string) {
-  return new Intl.DateTimeFormat(undefined, {
-    month: 'short',
-    day: 'numeric',
-  }).format(parseDate(date))
-}
-
-function formatCreatedAt(timestamp: string) {
-  return new Intl.DateTimeFormat(undefined, {
-    month: 'short',
-    day: 'numeric',
-  }).format(new Date(timestamp))
-}
-
-function formatSavedTime(timestamp: string) {
-  return new Intl.DateTimeFormat(undefined, {
-    hour: 'numeric',
-    minute: '2-digit',
-  }).format(new Date(timestamp))
-}
-
-function getToday() {
-  const today = new Date()
-  today.setHours(0, 0, 0, 0)
-  return today
-}
-
-function getDifferenceInDays(date: string) {
-  return Math.round((parseDate(date).getTime() - getToday().getTime()) / 86_400_000)
-}
-
-function getDueState(task: Task): { label: string; tone: DueTone } {
-  if (task.completed) {
-    return {
-      label: 'Completed',
-      tone: 'complete',
-    }
+function getDiscountAmount(product: Product) {
+  if (!product.originalPrice) {
+    return 0
   }
 
-  if (!task.dueDate) {
-    return {
-      label: 'Flexible',
-      tone: 'upcoming',
-    }
-  }
-
-  const differenceInDays = getDifferenceInDays(task.dueDate)
-
-  if (differenceInDays < 0) {
-    return {
-      label: 'Overdue',
-      tone: 'overdue',
-    }
-  }
-
-  if (differenceInDays === 0) {
-    return {
-      label: 'Due today',
-      tone: 'today',
-    }
-  }
-
-  if (differenceInDays === 1) {
-    return {
-      label: 'Due tomorrow',
-      tone: 'upcoming',
-    }
-  }
-
-  return {
-    label: `${differenceInDays} days left`,
-    tone: 'upcoming',
-  }
+  return product.originalPrice - product.price
 }
 
-function compareDueDates(leftTask: Task, rightTask: Task) {
-  if (leftTask.dueDate && rightTask.dueDate) {
-    return leftTask.dueDate.localeCompare(rightTask.dueDate)
+function getSearchHaystack(product: Product) {
+  return [
+    product.name,
+    product.brand,
+    product.description,
+    product.purity,
+    product.origin,
+    product.delivery,
+    ...product.highlights,
+  ]
+    .join(' ')
+    .toLowerCase()
+}
+
+function compareProducts(left: Product, right: Product, sortOption: SortOption) {
+  if (sortOption === 'price-low') {
+    return left.price - right.price
   }
 
-  if (leftTask.dueDate) {
-    return -1
+  if (sortOption === 'price-high') {
+    return right.price - left.price
   }
 
-  if (rightTask.dueDate) {
-    return 1
+  if (sortOption === 'rating') {
+    return right.rating - left.rating || right.reviewCount - left.reviewCount
   }
 
-  return 0
-}
+  if (sortOption === 'deal') {
+    return (right.dealPercent ?? 0) - (left.dealPercent ?? 0) || right.rating - left.rating
+  }
 
-function sortTasks(tasks: Task[], sortOption: SortOption) {
-  return [...tasks].sort((leftTask, rightTask) => {
-    if (leftTask.completed !== rightTask.completed) {
-      return Number(leftTask.completed) - Number(rightTask.completed)
-    }
-
-    const priorityDifference =
-      priorityRank[leftTask.priority] - priorityRank[rightTask.priority]
-    const dueDateDifference = compareDueDates(leftTask, rightTask)
-    const recencyDifference =
-      rightTask.createdAt.localeCompare(leftTask.createdAt)
-
-    switch (sortOption) {
-      case 'due':
-        return dueDateDifference || priorityDifference || recencyDifference
-      case 'recent':
-        return recencyDifference || priorityDifference || dueDateDifference
-      case 'priority':
-        return priorityDifference || dueDateDifference || recencyDifference
-      case 'smart':
-      default:
-        return priorityDifference || dueDateDifference || recencyDifference
-    }
-  })
-}
-
-function countTasksByCategory(tasks: Task[]) {
-  const counts = tasks.reduce<Record<string, number>>((accumulator, task) => {
-    const nextCategory = task.category.trim() || 'General'
-    accumulator[nextCategory] = (accumulator[nextCategory] ?? 0) + 1
-    return accumulator
-  }, {})
-
-  return Object.entries(counts)
-    .sort(
-      ([leftCategory, leftCount], [rightCategory, rightCount]) =>
-        rightCount - leftCount || leftCategory.localeCompare(rightCategory),
-    )
-    .map(([category, count]) => ({ category, count }))
-}
-
-function pluralize(word: string, count: number) {
-  return count === 1 ? word : `${word}s`
-}
-
-function StatCard({ label, value, copy }: StatCardProps) {
   return (
-    <article className="stat-card">
-      <p className="stat-label">{label}</p>
-      <p className="stat-value">{value}</p>
-      <p className="stat-copy">{copy}</p>
-    </article>
+    Number(right.isCertified) - Number(left.isCertified) ||
+    (right.dealPercent ?? 0) - (left.dealPercent ?? 0) ||
+    right.rating - left.rating
   )
 }
 
-function FilterPill({ label, isActive, onClick }: FilterPillProps) {
+function buildBagLines(bag: BagRecord): BagLine[] {
+  return Object.entries(bag)
+    .map(([productId, quantity]) => {
+      const product = products.find((item) => item.id === productId)
+
+      if (!product || quantity <= 0) {
+        return null
+      }
+
+      return {
+        product,
+        quantity,
+      }
+    })
+    .filter((line): line is BagLine => line !== null)
+}
+
+function ProductArt({ product, variant = 'card' }: ProductArtProps) {
+  const artStyles = {
+    '--product-start': product.palette[0],
+    '--product-end': product.palette[1],
+    '--product-glow': product.palette[2],
+  } as CSSProperties
+
   return (
-    <button
-      type="button"
-      className={`pill-button${isActive ? ' is-active' : ''}`}
-      onClick={onClick}
-      aria-pressed={isActive}
-    >
-      {label}
-    </button>
+    <div className={`product-art product-art--${variant}`} style={artStyles}>
+      <img className="product-art__watermark" src={nyraLogo} alt="" aria-hidden="true" />
+      <div className="product-art__halo" />
+      <div className="product-art__jewel" />
+      <div className="product-art__base" />
+      <span className="product-art__label">{product.spotlight}</span>
+      <span className="product-art__purity">{product.purity}</span>
+    </div>
   )
 }
 
-function TaskCard({ task, onToggle, onEdit, onDelete }: TaskCardProps) {
-  const dueState = getDueState(task)
+function RatingRow({
+  rating,
+  reviewCount,
+}: {
+  rating: number
+  reviewCount: number
+}) {
+  const roundedRating = Math.round(rating)
 
   return (
-    <article
-      className={`task-card task-card--${task.priority.toLowerCase()}${
-        task.completed ? ' task-card--complete' : ''
-      }`}
-    >
-      <div className="task-card__top">
-        <button
-          type="button"
-          className={`task-toggle${task.completed ? ' is-complete' : ''}`}
-          onClick={() => onToggle(task.id)}
-          aria-label={
-            task.completed
-              ? `Mark ${task.title} as incomplete`
-              : `Mark ${task.title} as complete`
-          }
-        >
-          {task.completed ? 'Done' : 'Open'}
-        </button>
-
-        <div className="task-card__content">
-          <div className="task-card__eyebrow">
-            <span className="tag">{task.category}</span>
-            <span className={`due-chip due-chip--${dueState.tone}`}>
-              {dueState.label}
-            </span>
-          </div>
-
-          <div className="task-card__headline">
-            <h3>{task.title}</h3>
-            <span
-              className={`priority-pill priority-pill--${task.priority.toLowerCase()}`}
-            >
-              {priorityBadgeCopy[task.priority]}
-            </span>
-          </div>
-
-          <p className="task-card__description">
-            {task.details || 'No extra notes added yet.'}
-          </p>
-        </div>
-      </div>
-
-      <div className="task-card__footer">
-        <div className="task-card__meta">
-          <span className="task-date">
-            {task.dueDate ? `Due ${formatDate(task.dueDate)}` : 'No due date'}
+    <div className="rating-row" aria-label={`${rating} out of 5 stars from ${reviewCount} reviews`}>
+      <div className="rating-row__stars" aria-hidden="true">
+        {Array.from({ length: 5 }, (_, index) => (
+          <span key={index} className={index < roundedRating ? 'is-filled' : ''}>
+            ★
           </span>
-          <span className="task-date">Created {formatCreatedAt(task.createdAt)}</span>
+        ))}
+      </div>
+      <span className="rating-row__value">{rating.toFixed(1)}</span>
+      <span className="rating-row__count">({reviewCount.toLocaleString()} reviews)</span>
+    </div>
+  )
+}
+
+function ProductCard({
+  product,
+  departmentLabel,
+  isSelected,
+  onSelect,
+  onAddToBag,
+}: ProductCardProps) {
+  const savings = getDiscountAmount(product)
+
+  return (
+    <article className={`product-card ${isSelected ? 'is-selected' : ''}`}>
+      <button type="button" className="product-card__visual" onClick={() => onSelect(product.id)}>
+        <ProductArt product={product} />
+      </button>
+
+      <div className="product-card__content">
+        <div className="product-card__top">
+          <div>
+            <p className="product-card__brand">{product.brand}</p>
+            <h3 className="product-card__title">{product.name}</h3>
+          </div>
+          {product.badge ? <span className="product-card__badge">{product.badge}</span> : null}
         </div>
 
-        <div className="task-card__actions">
-          <button
-            type="button"
-            className="text-button"
-            onClick={() => onEdit(task)}
-          >
-            Edit
+        <p className="product-card__description">{product.description}</p>
+
+        <div className="product-card__chips">
+          <span className="product-chip">{departmentLabel}</span>
+          {product.highlights.slice(0, 2).map((highlight) => (
+            <span key={highlight} className="product-chip product-chip--soft">
+              {highlight}
+            </span>
+          ))}
+        </div>
+
+        <RatingRow rating={product.rating} reviewCount={product.reviewCount} />
+
+        <div className="product-card__pricing">
+          <div className="product-card__price-group">
+            <strong>{formatPrice(product.price)}</strong>
+            {product.originalPrice ? <span>{formatPrice(product.originalPrice)}</span> : null}
+          </div>
+          {savings > 0 ? <span className="product-card__savings">Save {formatPrice(savings)}</span> : null}
+        </div>
+
+        <div className="product-card__meta">
+          <span>{product.purity}</span>
+          <span>{product.origin}</span>
+          <span>{product.delivery}</span>
+        </div>
+
+        <div className="product-card__footer">
+          <span className={`stock-pill ${product.inventoryTone === 'low' ? 'is-low' : ''}`}>
+            {product.inventoryMessage}
+          </span>
+          {product.isCertified ? <span className="certified-pill">Certified</span> : null}
+        </div>
+
+        <div className="product-card__actions">
+          <button type="button" className="button button--ghost" onClick={() => onSelect(product.id)}>
+            View details
           </button>
-          <button
-            type="button"
-            className="text-button text-button--danger"
-            onClick={() => onDelete(task)}
-          >
-            Delete
+          <button type="button" className="button button--primary" onClick={() => onAddToBag(product.id)}>
+            Add to bag
           </button>
         </div>
       </div>
@@ -384,794 +289,644 @@ function TaskCard({ task, onToggle, onEdit, onDelete }: TaskCardProps) {
 }
 
 function App() {
-  const [tasks, setTasks] = useState<Task[]>(() => readStoredTasks())
-  const [form, setForm] = useState<TaskForm>(emptyForm)
-  const [editingTaskId, setEditingTaskId] = useState<string | null>(null)
-  const [statusFilter, setStatusFilter] = useState<StatusFilter>('all')
-  const [priorityFilter, setPriorityFilter] = useState<PriorityFilter>('all')
-  const [sortOption, setSortOption] = useState<SortOption>('smart')
-  const [searchTerm, setSearchTerm] = useState('')
-  const [hasAttemptedSubmit, setHasAttemptedSubmit] = useState(false)
-  const [isStorageAvailable, setIsStorageAvailable] = useState(true)
-  const [lastSavedAt, setLastSavedAt] = useState<string | null>(null)
+  const [searchQuery, setSearchQuery] = useState('')
+  const [sortOption, setSortOption] = useState<SortOption>('featured')
+  const [activeDepartment, setActiveDepartment] = useState<DepartmentFilter>('all')
+  const [selectedProductId, setSelectedProductId] = useState(products[0]?.id ?? '')
+  const [bag, setBag] = useState<BagRecord>(() => readStoredBag())
+  const [isBagOpen, setBagOpen] = useState(false)
 
-  const deferredSearch = useDeferredValue(searchTerm.trim().toLowerCase())
-  const composerRef = useRef<HTMLElement | null>(null)
-  const titleInputRef = useRef<HTMLInputElement | null>(null)
-  const titleHintId = useId()
-  const detailsHintId = useId()
-  const boardStatusId = useId()
+  const deferredSearchQuery = useDeferredValue(searchQuery.trim().toLowerCase())
 
-  useEffect(() => {
-    function handleStorage(event: StorageEvent) {
-      if (event.storageArea !== window.localStorage || event.key !== STORAGE_KEY) {
-        return
+  const filteredProducts = [...products]
+    .filter((product) => {
+      const matchesDepartment =
+        activeDepartment === 'all' ? true : product.department === activeDepartment
+
+      if (!matchesDepartment) {
+        return false
       }
 
-      setTasks(readStoredTasks())
-      setIsStorageAvailable(true)
-      setLastSavedAt(new Date().toISOString())
-    }
+      if (!deferredSearchQuery) {
+        return true
+      }
 
-    window.addEventListener('storage', handleStorage)
-    return () => window.removeEventListener('storage', handleStorage)
-  }, [])
+      return getSearchHaystack(product).includes(deferredSearchQuery)
+    })
+    .sort((left, right) => compareProducts(left, right, sortOption))
 
   useEffect(() => {
-    if (!editingTaskId) {
+    if (typeof window === 'undefined') {
       return
     }
 
-    composerRef.current?.scrollIntoView({
-      behavior: 'smooth',
-      block: 'start',
-    })
-    titleInputRef.current?.focus()
-  }, [editingTaskId])
+    window.localStorage.setItem(BAG_STORAGE_KEY, JSON.stringify(bag))
+  }, [bag])
 
-  const sortedTasks = sortTasks(tasks, sortOption)
-  const visibleTasks = sortedTasks.filter((task) => {
-    if (statusFilter === 'active' && task.completed) {
-      return false
+  useEffect(() => {
+    if (typeof document === 'undefined') {
+      return
     }
 
-    if (statusFilter === 'completed' && !task.completed) {
-      return false
+    document.body.classList.toggle('has-overlay', isBagOpen)
+
+    return () => {
+      document.body.classList.remove('has-overlay')
+    }
+  }, [isBagOpen])
+
+  useEffect(() => {
+    if (filteredProducts.length === 0) {
+      return
     }
 
-    if (priorityFilter !== 'all' && task.priority !== priorityFilter) {
-      return false
+    const selectedProductStillVisible = filteredProducts.some(
+      (product) => product.id === selectedProductId,
+    )
+
+    if (!selectedProductStillVisible) {
+      setSelectedProductId(filteredProducts[0].id)
     }
+  }, [filteredProducts, selectedProductId])
 
-    if (!deferredSearch) {
-      return true
-    }
+  const bagLines = buildBagLines(bag)
+  const bagItemCount = bagLines.reduce((total, line) => total + line.quantity, 0)
+  const subtotal = bagLines.reduce((total, line) => total + line.product.price * line.quantity, 0)
+  const shipping =
+    bagItemCount === 0
+      ? 0
+      : subtotal >= FREE_INSURED_SHIPPING_THRESHOLD
+        ? 0
+        : STANDARD_INSURED_SHIPPING
+  const vat = subtotal * 0.13
+  const total = subtotal + shipping + vat
+  const freeShippingRemaining = Math.max(0, FREE_INSURED_SHIPPING_THRESHOLD - subtotal)
+  const shippingProgress = Math.min(100, (subtotal / FREE_INSURED_SHIPPING_THRESHOLD) * 100)
 
-    const searchableText =
-      `${task.title} ${task.details} ${task.category}`.toLowerCase()
+  const selectedProduct =
+    filteredProducts.length === 0
+      ? undefined
+      : filteredProducts.find((product) => product.id === selectedProductId) ?? filteredProducts[0]
 
-    return searchableText.includes(deferredSearch)
-  })
+  const selectedDepartment =
+    selectedProduct ? departmentMap.get(selectedProduct.department) : undefined
 
-  const activeTasks = tasks.filter((task) => !task.completed)
-  const activeCount = activeTasks.length
-  const completedCount = tasks.length - activeCount
-  const overdueCount = tasks.filter((task) => {
-    if (task.completed || !task.dueDate) {
-      return false
-    }
+  const activeDepartmentMeta =
+    activeDepartment === 'all'
+      ? departmentFilters[0]
+      : departmentFilters.find((department) => department.id === activeDepartment) ?? departmentFilters[0]
 
-    return getDueState(task).tone === 'overdue'
-  }).length
-  const dueSoonCount = tasks.filter((task) => {
-    if (task.completed || !task.dueDate) {
-      return false
-    }
+  const featuredDepartments = departments.slice(0, 4)
+  const topDeals = [...products]
+    .sort((left, right) => compareProducts(left, right, 'deal'))
+    .slice(0, 2)
+  const recommendations = products
+    .filter((product) => !bag[product.id])
+    .sort((left, right) => compareProducts(left, right, 'featured'))
+    .slice(0, 2)
 
-    const differenceInDays = getDifferenceInDays(task.dueDate)
-    return differenceInDays >= 0 && differenceInDays <= DUE_SOON_WINDOW
-  }).length
-  const highPriorityCount = activeTasks.filter(
-    (task) => task.priority === 'High',
-  ).length
-  const completionRate =
-    tasks.length === 0 ? 0 : Math.round((completedCount / tasks.length) * 100)
-  const focusTasks = sortTasks(activeTasks, 'smart').slice(0, 3)
-  const nextMilestone =
-    sortTasks(activeTasks.filter((task) => Boolean(task.dueDate)), 'due')[0] ??
-    sortTasks(activeTasks, 'smart')[0]
-  const topCategories = countTasksByCategory(activeTasks).slice(0, 3)
-  const maxCategoryCount = topCategories[0]?.count ?? 1
-  const editingTask =
-    editingTaskId === null
-      ? null
-      : tasks.find((task) => task.id === editingTaskId) ?? null
-  const showTitleError = hasAttemptedSubmit && form.title.trim().length === 0
-  const hasActiveView =
-    statusFilter !== 'all' ||
-    priorityFilter !== 'all' ||
-    sortOption !== 'smart' ||
-    Boolean(deferredSearch)
-  const activeViewCount =
-    Number(statusFilter !== 'all') +
-    Number(priorityFilter !== 'all') +
-    Number(sortOption !== 'smart') +
-    Number(Boolean(deferredSearch))
-
-  const boardSummary =
-    tasks.length === 0
-      ? 'No tasks yet. Create the first task to start the board.'
-      : visibleTasks.length === tasks.length
-        ? `Showing all ${tasks.length} ${pluralize('task', tasks.length)}.`
-        : `Showing ${visibleTasks.length} of ${tasks.length} ${pluralize(
-            'task',
-            tasks.length,
-          )}.`
-
-  const boardAnnouncement =
-    visibleTasks.length === 0
-      ? 'No tasks match the current board settings.'
-      : `${visibleTasks.length} ${pluralize('task', visibleTasks.length)} visible in the board.`
-
-  const todayLabel = new Intl.DateTimeFormat(undefined, {
-    weekday: 'long',
-    month: 'long',
-    day: 'numeric',
-  }).format(new Date())
-
-  const saveLabel = isStorageAvailable
-    ? lastSavedAt
-      ? `Saved locally at ${formatSavedTime(lastSavedAt)}`
-      : 'Ready to save locally'
-    : 'Local storage unavailable'
-
-  function updateFormField<Key extends keyof TaskForm>(
-    field: Key,
-    value: TaskForm[Key],
-  ) {
-    setForm((previousForm) => ({
-      ...previousForm,
-      [field]: value,
+  function handleAddToBag(productId: string) {
+    setBag((currentBag) => ({
+      ...currentBag,
+      [productId]: (currentBag[productId] ?? 0) + 1,
     }))
+    setBagOpen(true)
   }
 
-  function scrollComposerIntoView() {
-    composerRef.current?.scrollIntoView({
-      behavior: 'smooth',
-      block: 'start',
+  function handleQuantityChange(productId: string, delta: number) {
+    setBag((currentBag) => {
+      const nextQuantity = (currentBag[productId] ?? 0) + delta
+
+      if (nextQuantity <= 0) {
+        const nextBag = { ...currentBag }
+        delete nextBag[productId]
+        return nextBag
+      }
+
+      return {
+        ...currentBag,
+        [productId]: nextQuantity,
+      }
     })
-    titleInputRef.current?.focus()
   }
 
-  function persistTasks(nextTasks: Task[]) {
-    setTasks(nextTasks)
-
-    try {
-      window.localStorage.setItem(STORAGE_KEY, JSON.stringify(nextTasks))
-      setIsStorageAvailable(true)
-      setLastSavedAt(new Date().toISOString())
-    } catch {
-      setIsStorageAvailable(false)
-    }
+  function handleRemoveFromBag(productId: string) {
+    setBag((currentBag) => {
+      const nextBag = { ...currentBag }
+      delete nextBag[productId]
+      return nextBag
+    })
   }
 
-  function resetForm() {
-    setForm(emptyForm)
-    setEditingTaskId(null)
-    setHasAttemptedSubmit(false)
+  function handleDepartmentChange(departmentId: DepartmentFilter) {
+    startTransition(() => {
+      setActiveDepartment(departmentId)
+    })
   }
 
-  function handleSubmit(event: FormEvent<HTMLFormElement>) {
+  function handleSortChange(nextSort: SortOption) {
+    startTransition(() => {
+      setSortOption(nextSort)
+    })
+  }
+
+  function handleSearchSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
 
-    const title = form.title.trim()
-
-    if (!title) {
-      setHasAttemptedSubmit(true)
-      titleInputRef.current?.focus()
-      return
+    if (filteredProducts.length > 0) {
+      setSelectedProductId(filteredProducts[0].id)
     }
-
-    const nextTaskDetails = {
-      title,
-      details: form.details.trim(),
-      category: form.category.trim() || 'General',
-      dueDate: form.dueDate,
-      priority: form.priority,
-    }
-
-    if (editingTaskId) {
-      persistTasks(
-        tasks.map((task) =>
-          task.id === editingTaskId ? { ...task, ...nextTaskDetails } : task,
-        ),
-      )
-      resetForm()
-      return
-    }
-
-    const newTask: Task = {
-      id: crypto.randomUUID(),
-      completed: false,
-      createdAt: new Date().toISOString(),
-      ...nextTaskDetails,
-    }
-
-    persistTasks([newTask, ...tasks])
-    setForm((previousForm) => ({
-      ...emptyForm,
-      category: previousForm.category.trim() || emptyForm.category,
-      priority: previousForm.priority,
-    }))
-    setHasAttemptedSubmit(false)
   }
 
-  function handleToggleTask(taskId: string) {
-    persistTasks(
-      tasks.map((task) =>
-        task.id === taskId ? { ...task, completed: !task.completed } : task,
-      ),
-    )
-  }
-
-  function handleDeleteTask(task: Task) {
-    if (
-      !window.confirm(`Delete "${task.title}"? This action cannot be undone.`)
-    ) {
-      return
-    }
-
-    if (editingTaskId === task.id) {
-      resetForm()
-    }
-
-    persistTasks(tasks.filter((previousTask) => previousTask.id !== task.id))
-  }
-
-  function handleEditTask(task: Task) {
-    setEditingTaskId(task.id)
-    setHasAttemptedSubmit(false)
-    setForm({
-      title: task.title,
-      details: task.details,
-      category: task.category,
-      dueDate: task.dueDate,
-      priority: task.priority,
-    })
-  }
-
-  function handleClearCompleted() {
-    if (completedCount === 0) {
-      return
-    }
-
-    if (
-      !window.confirm(
-        `Remove ${completedCount} completed ${pluralize(
-          'task',
-          completedCount,
-        )} from the board?`,
-      )
-    ) {
-      return
-    }
-
-    const editingTaskWillBeRemoved =
-      editingTaskId !== null &&
-      tasks.some((task) => task.id === editingTaskId && task.completed)
-
-    if (editingTaskWillBeRemoved) {
-      resetForm()
-    }
-
-    persistTasks(tasks.filter((task) => !task.completed))
-  }
-
-  function handleMarkAllDone() {
-    if (activeCount === 0) {
-      return
-    }
-
-    persistTasks(tasks.map((task) => ({ ...task, completed: true })))
-  }
-
-  function handleResetView() {
-    setSearchTerm('')
-    setStatusFilter('all')
-    setPriorityFilter('all')
-    setSortOption('smart')
-  }
-
-  function handleStartNewTask() {
-    resetForm()
-    scrollComposerIntoView()
+  function clearFilters() {
+    setSearchQuery('')
+    handleDepartmentChange('all')
+    handleSortChange('featured')
   }
 
   return (
-    <div className="app-shell">
-      <aside className="overview-panel">
-        <div className="brand-row">
-          <div className="brand-mark">
-            <span className="brand-mark__dot" aria-hidden="true"></span>
-            Momentum Board
-          </div>
-          <span
-            className={`status-chip${isStorageAvailable ? '' : ' is-warning'}`}
-          >
-            {saveLabel}
-          </span>
-        </div>
+    <>
+      <div className="storefront">
+        <header className="topbar">
+          <div className="topbar__inner">
+            <a className="brand-lockup" href="#home" aria-label="Nyra homepage">
+              <img className="brand-lockup__image" src={nyraLogo} alt="Nyra logo" />
+              <span className="brand-lockup__copy">
+                <strong>Nyra</strong>
+                <span>Nepali Jewellery House</span>
+              </span>
+            </a>
 
-        <p className="section-label">Operations overview</p>
-        <h1 className="overview-title">
-          Professional task management without the clutter.
-        </h1>
-        <p className="overview-copy">
-          Keep priorities visible, deadlines actionable, and progress easy to
-          review in a calm, focused workflow.
-        </p>
-
-        <div className="overview-meta">
-          <span className="mini-chip">Responsive UI</span>
-          <span className="mini-chip">Accessible controls</span>
-          <span className="mini-chip">Cross-tab sync</span>
-        </div>
-
-        <div className="stat-grid">
-          <StatCard
-            label="Open work"
-            value={activeCount}
-            copy="Tasks currently in motion."
-          />
-          <StatCard
-            label="Due soon"
-            value={dueSoonCount}
-            copy="Targets landing in the next few days."
-          />
-          <StatCard
-            label="High priority"
-            value={highPriorityCount}
-            copy="Items demanding faster attention."
-          />
-          <StatCard
-            label="Completed"
-            value={`${completionRate}%`}
-            copy="Board completion at a glance."
-          />
-        </div>
-
-        <section className="health-panel">
-          <div className="health-panel__top">
-            <div>
-              <p className="focus-panel__label">Execution health</p>
-              <strong className="health-panel__value">
-                {completionRate}% complete
-              </strong>
-            </div>
-            <span className="header-date">{todayLabel}</span>
-          </div>
-          <div
-            className="progress-bar"
-            role="progressbar"
-            aria-label="Completion progress"
-            aria-valuemin={0}
-            aria-valuemax={100}
-            aria-valuenow={completionRate}
-          >
-            <span style={{ width: `${completionRate}%` }}></span>
-          </div>
-          <p className="health-panel__copy">
-            {overdueCount === 0
-              ? 'Delivery is on track. Nothing is overdue right now.'
-              : `${overdueCount} overdue ${pluralize(
-                  'task',
-                  overdueCount,
-                )} need attention.`}
-          </p>
-        </section>
-
-        <section className="focus-panel">
-          <div className="focus-panel__head">
-            <div>
-              <p className="focus-panel__label">Focus lane</p>
-              <h2>Next up</h2>
-            </div>
-            <p className="focus-panel__note">
-              {nextMilestone?.dueDate
-                ? `Closest target ${formatDate(nextMilestone.dueDate)}`
-                : 'No hard deadline locked in'}
-            </p>
-          </div>
-
-          {focusTasks.length > 0 ? (
-            <ul className="focus-list">
-              {focusTasks.map((task) => {
-                const dueState = getDueState(task)
-
-                return (
-                  <li key={task.id} className="focus-item">
-                    <strong>{task.title}</strong>
-                    <span>{task.category}</span>
-                    <span>{dueState.label}</span>
-                  </li>
-                )
-              })}
-            </ul>
-          ) : (
-            <p className="focus-empty">
-              Everything is complete. Add a new task to restart the board.
-            </p>
-          )}
-        </section>
-
-        <section className="signal-panel">
-          <div className="signal-panel__head">
-            <div>
-              <p className="focus-panel__label">Category load</p>
-              <h2>Where work is stacking up</h2>
-            </div>
-            <p className="signal-panel__caption">
-              {topCategories.length > 0
-                ? `${topCategories.length} active areas`
-                : 'No active work'}
-            </p>
-          </div>
-
-          {topCategories.length > 0 ? (
-            <ul className="signal-list">
-              {topCategories.map((entry) => (
-                <li key={entry.category} className="signal-item">
-                  <div className="signal-item__row">
-                    <strong>{entry.category}</strong>
-                    <span>{entry.count}</span>
-                  </div>
-                  <div className="signal-item__meter" aria-hidden="true">
-                    <span
-                      style={{
-                        width: `${(entry.count / maxCategoryCount) * 100}%`,
-                      }}
-                    ></span>
-                  </div>
-                </li>
+            <nav className="topbar__nav" aria-label="Primary">
+              {navigationLinks.map((item) => (
+                <a key={item.label} href={`#${item.anchor}`}>
+                  {item.label}
+                </a>
               ))}
-            </ul>
-          ) : (
-            <p className="focus-empty">
-              Categories will appear here as soon as work is added.
-            </p>
-          )}
-        </section>
-      </aside>
+            </nav>
 
-      <main className="workspace">
-        <section className="surface-card" ref={composerRef}>
-          <div className="section-head">
-            <div>
-              <p className="section-label">
-                {editingTaskId ? 'Editing mode' : 'Task composer'}
+            <div className="topbar__actions">
+              <span className="status-pill">Insured delivery across Nepal</span>
+              <button type="button" className="bag-button" onClick={() => setBagOpen(true)}>
+                <span>Bag</span>
+                <strong>{bagItemCount}</strong>
+              </button>
+            </div>
+          </div>
+        </header>
+
+        <main className="page-shell">
+          <section className="hero" id="home">
+            <div className="hero__copy">
+              <p className="section-label">Fine jewellery for Nepal</p>
+              <h1>Elegant gold, silver, and diamond pieces with a cleaner shopping experience.</h1>
+              <p className="hero__description">
+                Nyra is designed as a jewellery-first storefront for Nepali buyers, with stronger
+                brand presence, simpler browsing, and product detail panels that feel more premium
+                and easier to shop.
               </p>
-              <h2 className="section-title">
-                {editingTaskId
-                  ? 'Refine the selected task'
-                  : 'Add focused work in seconds'}
-              </h2>
-            </div>
-            <p className="section-copy">
-              Capture a clear outcome, set urgency, and keep each task ready for
-              action.
-            </p>
-          </div>
 
-          <form className="composer-form" onSubmit={handleSubmit} noValidate>
-            <div className="composer-grid">
-              <label className="field field--wide">
-                <div className="field__meta">
-                  <span>Task title</span>
-                  <span className="field__count">
-                    {form.title.length}/{TITLE_LIMIT}
-                  </span>
-                </div>
+              <form className="hero-search" onSubmit={handleSearchSubmit}>
+                <label className="sr-only" htmlFor="catalog-search">
+                  Search Nyra jewellery
+                </label>
                 <input
-                  ref={titleInputRef}
-                  type="text"
-                  value={form.title}
-                  onChange={(event) => {
-                    updateFormField('title', event.target.value)
-                    if (hasAttemptedSubmit && event.target.value.trim()) {
-                      setHasAttemptedSubmit(false)
-                    }
-                  }}
-                  placeholder="Finalize customer onboarding checklist"
-                  maxLength={TITLE_LIMIT}
-                  required
-                  aria-invalid={showTitleError}
-                  aria-describedby={titleHintId}
+                  id="catalog-search"
+                  name="catalog-search"
+                  type="search"
+                  value={searchQuery}
+                  onChange={(event) => setSearchQuery(event.target.value)}
+                  placeholder="Search tilhari, sunko chura, diamond ring, chaandi payal..."
                 />
-                <small
-                  id={titleHintId}
-                  className={`field__hint${showTitleError ? ' is-error' : ''}`}
-                >
-                  {showTitleError
-                    ? 'A task title is required before you can save.'
-                    : 'Start with a verb so the next action is obvious.'}
-                </small>
-              </label>
+                <button type="submit">Search pieces</button>
+              </form>
 
-              <label className="field field--wide">
-                <div className="field__meta">
-                  <span>Notes</span>
-                  <span className="field__count">
-                    {form.details.length}/{DETAILS_LIMIT}
-                  </span>
-                </div>
-                <textarea
-                  value={form.details}
-                  onChange={(event) =>
-                    updateFormField('details', event.target.value)
-                  }
-                  placeholder="Capture context, the desired outcome, or handoff details."
-                  maxLength={DETAILS_LIMIT}
-                  aria-describedby={detailsHintId}
-                />
-                <small id={detailsHintId} className="field__hint">
-                  Keep supporting notes short enough to scan during standups or reviews.
-                </small>
-              </label>
-
-              <label className="field">
-                <div className="field__meta">
-                  <span>Category</span>
-                  <span className="field__count">
-                    {form.category.length}/{CATEGORY_LIMIT}
-                  </span>
-                </div>
-                <input
-                  type="text"
-                  value={form.category}
-                  onChange={(event) =>
-                    updateFormField('category', event.target.value)
-                  }
-                  placeholder="Operations"
-                  maxLength={CATEGORY_LIMIT}
-                />
-              </label>
-
-              <label className="field">
-                <span>Due date</span>
-                <input
-                  type="date"
-                  value={form.dueDate}
-                  onChange={(event) =>
-                    updateFormField('dueDate', event.target.value)
-                  }
-                />
-              </label>
-
-              <label className="field field--compact">
-                <span>Priority</span>
-                <select
-                  value={form.priority}
-                  onChange={(event) =>
-                    updateFormField('priority', event.target.value as Priority)
-                  }
-                >
-                  <option value="High">High</option>
-                  <option value="Medium">Medium</option>
-                  <option value="Low">Low</option>
-                </select>
-              </label>
-            </div>
-
-            <div className="composer-actions">
-              <div className="helper-stack">
-                <p className="helper-text">
-                  Short, outcome-based tasks make the board easier to review and
-                  easier to trust.
-                </p>
-                <p className="editing-pill">
-                  {editingTask
-                    ? `Editing: ${editingTask.title}`
-                    : 'Create a task to populate the board.'}
-                </p>
-              </div>
-
-              <div className="button-row">
-                <button
-                  type="submit"
-                  className="button button--primary"
-                  disabled={form.title.trim().length === 0}
-                >
-                  {editingTaskId ? 'Update task' : 'Add task'}
-                </button>
-                <button
-                  type="button"
-                  className="button button--secondary"
-                  onClick={resetForm}
-                >
-                  {editingTaskId ? 'Cancel edit' : 'Reset form'}
+              <div className="hero__actions">
+                <a className="button button--primary" href="#catalog">
+                  Explore catalogue
+                </a>
+                <button type="button" className="button button--ghost" onClick={() => setBagOpen(true)}>
+                  Open bag
                 </button>
               </div>
-            </div>
-          </form>
-        </section>
 
-        <section className="surface-card">
-          <div className="section-head">
-            <div>
-              <p className="section-label">Board controls</p>
-              <h2 className="section-title">Find the right task fast</h2>
-            </div>
-            <p className="section-copy">
-              Search by title, notes, or category, then switch the board to the
-              exact operational view you need.
-            </p>
-          </div>
-
-          <div className="control-bar">
-            <label className="search-field">
-              <span>Search</span>
-              <input
-                type="search"
-                value={searchTerm}
-                onChange={(event) => setSearchTerm(event.target.value)}
-                placeholder="Search tasks, notes, or categories"
-                aria-describedby={boardStatusId}
-              />
-            </label>
-
-            <div className="filter-stack">
-              <div className="filter-set">
-                <span>Status</span>
-                <div className="pill-group">
-                  {statusOptions.map((option) => (
-                    <FilterPill
-                      key={option.value}
-                      label={option.label}
-                      isActive={statusFilter === option.value}
-                      onClick={() => setStatusFilter(option.value)}
-                    />
+              <div className="hero__trending">
+                <span>Trending searches</span>
+                <div className="hero__trend-list">
+                  {trendingSearches.map((trend) => (
+                    <button
+                      key={trend}
+                      type="button"
+                      className="trend-chip"
+                      onClick={() => setSearchQuery(trend)}
+                    >
+                      {trend}
+                    </button>
                   ))}
                 </div>
               </div>
 
-              <div className="filter-set">
-                <span>Priority</span>
-                <div className="pill-group">
-                  {priorityOptions.map((option) => (
-                    <FilterPill
-                      key={option.value}
-                      label={option.label}
-                      isActive={priorityFilter === option.value}
-                      onClick={() => setPriorityFilter(option.value)}
-                    />
-                  ))}
-                </div>
-              </div>
-            </div>
-
-            <label className="field field--compact">
-              <span>Sort by</span>
-              <select
-                value={sortOption}
-                onChange={(event) =>
-                  setSortOption(event.target.value as SortOption)
-                }
-              >
-                {sortOptions.map((option) => (
-                  <option key={option.value} value={option.value}>
-                    {option.label}
-                  </option>
+              <div className="hero__collections">
+                {featuredDepartments.map((department) => (
+                  <button
+                    key={department.id}
+                    type="button"
+                    className="hero-collection"
+                    style={{ '--collection-accent': department.accent } as CSSProperties}
+                    onClick={() => handleDepartmentChange(department.id)}
+                  >
+                    <strong>{department.label}</strong>
+                    <span>{department.stat}</span>
+                  </button>
                 ))}
-              </select>
-            </label>
-
-            <div className="quick-actions">
-              <button
-                type="button"
-                className="button button--secondary"
-                onClick={handleMarkAllDone}
-                disabled={activeCount === 0}
-              >
-                Mark all done
-              </button>
-              <button
-                type="button"
-                className="button button--secondary"
-                onClick={handleClearCompleted}
-                disabled={completedCount === 0}
-              >
-                Clear completed
-              </button>
-              <button
-                type="button"
-                className="button button--ghost"
-                onClick={handleResetView}
-                disabled={!hasActiveView}
-              >
-                Reset view
-              </button>
-            </div>
-          </div>
-
-          <div className="summary-row">
-            <span className="summary-pill">{boardSummary}</span>
-            {activeViewCount > 0 ? (
-              <span className="summary-pill summary-pill--muted">
-                {activeViewCount} active view change
-                {activeViewCount === 1 ? '' : 's'}
-              </span>
-            ) : null}
-          </div>
-        </section>
-
-        <section className="surface-card">
-          <div className="task-board__header">
-            <div>
-              <p className="section-label">Task board</p>
-              <h2 className="section-title">Current workload</h2>
-            </div>
-            <div className="board-badges">
-              <span className="mini-chip mini-chip--soft">
-                {activeCount} open
-              </span>
-              <span className="mini-chip mini-chip--soft">
-                {dueSoonCount} due soon
-              </span>
-              <span className="mini-chip mini-chip--soft">
-                {highPriorityCount} high priority
-              </span>
-            </div>
-          </div>
-
-          <p id={boardStatusId} className="sr-only" aria-live="polite">
-            {boardAnnouncement}
-          </p>
-
-          {visibleTasks.length > 0 ? (
-            <div className="task-list">
-              {visibleTasks.map((task) => (
-                <TaskCard
-                  key={task.id}
-                  task={task}
-                  onToggle={handleToggleTask}
-                  onEdit={handleEditTask}
-                  onDelete={handleDeleteTask}
-                />
-              ))}
-            </div>
-          ) : (
-            <div className="empty-state">
-              <p className="empty-state__eyebrow">
-                {tasks.length === 0 ? 'No tasks yet' : 'No matching tasks'}
-              </p>
-              <h3>
-                {tasks.length === 0
-                  ? 'Create the first task for your workspace.'
-                  : 'Try a broader search or reset the board view.'}
-              </h3>
-              <p>
-                {tasks.length === 0
-                  ? 'Start with a clear title, priority, and due date to build a reliable operational board.'
-                  : 'The current combination of search, filters, and sort order is hiding every task.'}
-              </p>
-              <div className="button-row">
-                <button
-                  type="button"
-                  className={`button ${
-                    tasks.length === 0
-                      ? 'button--primary'
-                      : 'button--secondary'
-                  }`}
-                  onClick={hasActiveView ? handleResetView : handleStartNewTask}
-                >
-                  {hasActiveView && tasks.length > 0 ? 'Reset view' : 'Create a task'}
-                </button>
               </div>
             </div>
-          )}
-        </section>
-      </main>
-    </div>
+
+            <div className="hero__visual">
+              <article className="logo-showcase">
+                <img className="logo-showcase__image" src={nyraLogo} alt="Nyra brand logo" />
+                <div className="logo-showcase__caption">
+                  <span>Nyra Signature</span>
+                  <strong>Gold, silver, and diamond collections with a refined Nepali identity.</strong>
+                </div>
+              </article>
+            </div>
+          </section>
+
+          <section className="benefits-strip" aria-label="Service highlights">
+            {serviceHighlights.map((highlight) => (
+              <article key={highlight.label} className="benefit-card">
+                <p className="section-label">{highlight.label}</p>
+                <h2>{highlight.value}</h2>
+                <p>{highlight.copy}</p>
+              </article>
+            ))}
+          </section>
+
+          <section className="catalog-layout">
+            <div className="catalog-column">
+              <section className="collection-grid" id="deals">
+                {editorialCollections.map((collection) => (
+                  <article
+                    key={collection.title}
+                    className="collection-card"
+                    style={{ '--card-accent': collection.accent } as CSSProperties}
+                  >
+                    <p className="section-label">Seasonal edit</p>
+                    <h2>{collection.title}</h2>
+                    <p>{collection.copy}</p>
+                    <span>{collection.cta}</span>
+                  </article>
+                ))}
+              </section>
+
+              <section className="catalog-panel" id="catalog">
+                <div className="catalog-panel__top">
+                  <div>
+                    <p className="section-label">Catalog</p>
+                    <h2>{activeDepartmentMeta.label}</h2>
+                    <p>{activeDepartmentMeta.blurb}</p>
+                  </div>
+
+                  <label className="sort-control">
+                    <span>Sort by</span>
+                    <select
+                      value={sortOption}
+                      onChange={(event) => handleSortChange(event.target.value as SortOption)}
+                    >
+                      {sortOptions.map((option) => (
+                        <option key={option.value} value={option.value}>
+                          {option.label}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                </div>
+
+                <div className="catalog-panel__toolbar">
+                  <p className="catalog-panel__result-copy">
+                    Showing {filteredProducts.length} piece{filteredProducts.length === 1 ? '' : 's'}
+                    {searchQuery ? ` for "${searchQuery}"` : ''}.
+                  </p>
+                  <button type="button" className="button button--ghost" onClick={clearFilters}>
+                    Reset filters
+                  </button>
+                </div>
+
+                <div className="filter-row">
+                  {departmentFilters.map((department) => (
+                    <button
+                      key={department.id}
+                      type="button"
+                      className={`filter-chip ${activeDepartment === department.id ? 'is-active' : ''}`}
+                      onClick={() => handleDepartmentChange(department.id)}
+                    >
+                      {department.label}
+                    </button>
+                  ))}
+                </div>
+
+                {filteredProducts.length > 0 ? (
+                  <div className="product-grid">
+                    {filteredProducts.map((product) => (
+                      <ProductCard
+                        key={product.id}
+                        product={product}
+                        departmentLabel={departmentMap.get(product.department)?.label ?? 'Featured'}
+                        isSelected={selectedProductId === product.id}
+                        onSelect={setSelectedProductId}
+                        onAddToBag={handleAddToBag}
+                      />
+                    ))}
+                  </div>
+                ) : (
+                  <div className="empty-state">
+                    <h3>No jewellery pieces matched your search.</h3>
+                    <p>Try a broader term or switch back to the full Nyra collection.</p>
+                    <button type="button" className="button button--primary" onClick={clearFilters}>
+                      Show all pieces
+                    </button>
+                  </div>
+                )}
+              </section>
+            </div>
+
+            <aside className="sidebar-column">
+              <section className="sidebar-card sidebar-card--feature" id="certified">
+                <div className="sidebar-card__header">
+                  <div>
+                    <p className="section-label">Selected piece</p>
+                    <h2>{selectedProduct?.name ?? 'Choose a jewellery piece'}</h2>
+                  </div>
+                  {selectedProduct?.badge ? (
+                    <span className="product-card__badge">{selectedProduct.badge}</span>
+                  ) : null}
+                </div>
+
+                {selectedProduct ? (
+                  <>
+                    <ProductArt product={selectedProduct} variant="showcase" />
+
+                    <div className="feature-panel__price">
+                      <strong>{formatPrice(selectedProduct.price)}</strong>
+                      {selectedProduct.originalPrice ? (
+                        <span>{formatPrice(selectedProduct.originalPrice)}</span>
+                      ) : null}
+                    </div>
+
+                    <RatingRow
+                      rating={selectedProduct.rating}
+                      reviewCount={selectedProduct.reviewCount}
+                    />
+
+                    <p className="feature-panel__description">{selectedProduct.description}</p>
+
+                    <div className="feature-panel__tags">
+                      {selectedDepartment ? <span>{selectedDepartment.label}</span> : null}
+                      <span>{selectedProduct.purity}</span>
+                      <span>{selectedProduct.origin}</span>
+                      {selectedProduct.isCertified ? <span>Certified</span> : null}
+                    </div>
+
+                    <ul className="feature-panel__list">
+                      {selectedProduct.highlights.map((highlight) => (
+                        <li key={highlight}>{highlight}</li>
+                      ))}
+                    </ul>
+
+                    <p className="feature-panel__delivery">{selectedProduct.delivery}</p>
+
+                    <div className="feature-panel__actions">
+                      <button
+                        type="button"
+                        className="button button--primary button--full"
+                        onClick={() => handleAddToBag(selectedProduct.id)}
+                      >
+                        Add selected piece
+                      </button>
+                    </div>
+                  </>
+                ) : (
+                  <p className="sidebar-card__empty">Filter reset will restore the featured jewellery view.</p>
+                )}
+              </section>
+
+              <section className="sidebar-card sidebar-card--summary">
+                <div className="sidebar-card__header">
+                  <div>
+                    <p className="section-label">Bag summary</p>
+                    <h2>{bagItemCount} piece{bagItemCount === 1 ? '' : 's'}</h2>
+                  </div>
+                  <button type="button" className="ghost-link" onClick={() => setBagOpen(true)}>
+                    Open bag
+                  </button>
+                </div>
+
+                <div className="summary-rows">
+                  <div>
+                    <span>Subtotal</span>
+                    <strong>{formatPrice(subtotal)}</strong>
+                  </div>
+                  <div>
+                    <span>Insured shipping</span>
+                    <strong>{shipping === 0 ? 'Free' : formatPrice(shipping)}</strong>
+                  </div>
+                  <div>
+                    <span>Estimated VAT</span>
+                    <strong>{formatPrice(vat)}</strong>
+                  </div>
+                  <div className="summary-rows__total">
+                    <span>Total</span>
+                    <strong>{formatPrice(total)}</strong>
+                  </div>
+                </div>
+
+                <div className="progress-card">
+                  <p>
+                    {freeShippingRemaining > 0
+                      ? `Add ${formatPrice(freeShippingRemaining)} more for free insured shipping.`
+                      : 'Your bag already qualifies for free insured shipping.'}
+                  </p>
+                  <div className="progress-bar" aria-hidden="true">
+                    <span style={{ width: `${shippingProgress}%` }} />
+                  </div>
+                </div>
+
+                <div className="recommendation-stack">
+                  {recommendations.map((product) => (
+                    <button
+                      key={product.id}
+                      type="button"
+                      className="recommendation-row"
+                      onClick={() => handleAddToBag(product.id)}
+                    >
+                      <span>{product.name}</span>
+                      <strong>{formatPrice(product.price)}</strong>
+                    </button>
+                  ))}
+                </div>
+              </section>
+
+              <section className="sidebar-card sidebar-card--steps" id="checkout">
+                <p className="section-label">Purchase flow</p>
+                <h2>Clear and premium from browse to checkout</h2>
+                <div className="checkout-steps">
+                  {checkoutSteps.map((step) => (
+                    <div key={step.step} className="checkout-step">
+                      <span>{step.step}</span>
+                      <div>
+                        <h3>{step.title}</h3>
+                        <p>{step.copy}</p>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+
+                <div className="deal-stack">
+                  {topDeals.map((product) => (
+                    <button
+                      key={product.id}
+                      type="button"
+                      className="deal-row"
+                      onClick={() => setSelectedProductId(product.id)}
+                    >
+                      <div>
+                        <strong>{product.name}</strong>
+                        <span>{product.dealPercent}% off</span>
+                      </div>
+                      <strong>{formatPrice(product.price)}</strong>
+                    </button>
+                  ))}
+                </div>
+              </section>
+            </aside>
+          </section>
+        </main>
+
+        <footer className="footer">
+          <div className="footer__brand">
+            <img className="footer__logo" src={nyraLogo} alt="Nyra logo" />
+            <div>
+              <p className="section-label">Nyra</p>
+              <h2>Jewellery experience refined for Nepal.</h2>
+              <p>
+                A cleaner storefront for bridal, heritage, gifting, and fine jewellery with a
+                stronger luxury presentation.
+              </p>
+            </div>
+          </div>
+
+          <div className="footer__columns">
+            {footerColumns.map((column) => (
+              <div key={column.title}>
+                <h3>{column.title}</h3>
+                <ul>
+                  {column.links.map((link) => (
+                    <li key={link}>
+                      <a href="#catalog">{link}</a>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            ))}
+          </div>
+        </footer>
+      </div>
+
+      {isBagOpen ? (
+        <div className="bag-overlay" role="presentation" onClick={() => setBagOpen(false)}>
+          <aside
+            className="bag-drawer"
+            aria-label="Shopping bag"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="bag-drawer__header">
+              <div>
+                <p className="section-label">Your bag</p>
+                <h2>{bagItemCount} piece{bagItemCount === 1 ? '' : 's'}</h2>
+              </div>
+              <button type="button" className="ghost-link" onClick={() => setBagOpen(false)}>
+                Close
+              </button>
+            </div>
+
+            {bagLines.length > 0 ? (
+              <div className="bag-drawer__content">
+                <div className="bag-line-list">
+                  {bagLines.map((line) => (
+                    <article key={line.product.id} className="bag-line">
+                      <ProductArt product={line.product} />
+                      <div className="bag-line__copy">
+                        <div>
+                          <h3>{line.product.name}</h3>
+                          <p>{line.product.purity}</p>
+                          <span>{line.product.delivery}</span>
+                        </div>
+
+                        <strong>{formatPrice(line.product.price * line.quantity)}</strong>
+
+                        <div className="bag-line__controls">
+                          <div className="quantity-stepper">
+                            <button
+                              type="button"
+                              onClick={() => handleQuantityChange(line.product.id, -1)}
+                            >
+                              -
+                            </button>
+                            <span>{line.quantity}</span>
+                            <button
+                              type="button"
+                              onClick={() => handleQuantityChange(line.product.id, 1)}
+                            >
+                              +
+                            </button>
+                          </div>
+                          <button
+                            type="button"
+                            className="text-button"
+                            onClick={() => handleRemoveFromBag(line.product.id)}
+                          >
+                            Remove
+                          </button>
+                        </div>
+                      </div>
+                    </article>
+                  ))}
+                </div>
+
+                <div className="bag-drawer__summary">
+                  <div>
+                    <span>Subtotal</span>
+                    <strong>{formatPrice(subtotal)}</strong>
+                  </div>
+                  <div>
+                    <span>Insured shipping</span>
+                    <strong>{shipping === 0 ? 'Free' : formatPrice(shipping)}</strong>
+                  </div>
+                  <div>
+                    <span>Estimated VAT</span>
+                    <strong>{formatPrice(vat)}</strong>
+                  </div>
+                  <div className="bag-drawer__total">
+                    <span>Total</span>
+                    <strong>{formatPrice(total)}</strong>
+                  </div>
+                  <button type="button" className="button button--primary button--full">
+                    Checkout with eSewa / card
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <div className="empty-bag">
+                <img src={nyraLogo} alt="Nyra logo" />
+                <h3>Your bag is empty.</h3>
+                <p>Add a Nyra piece to preview the cleaner bag and checkout experience.</p>
+              </div>
+            )}
+          </aside>
+        </div>
+      ) : null}
+    </>
   )
 }
 
