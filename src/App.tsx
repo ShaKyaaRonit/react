@@ -2,21 +2,20 @@ import { startTransition, useDeferredValue, useEffect, useState } from 'react'
 import type { CSSProperties, FormEvent } from 'react'
 import './App.css'
 import nyraLogo from './assets/nyra-logo.png'
-import {
-  checkoutSteps,
-  departments,
-  editorialCollections,
-  footerColumns,
-  navigationLinks,
-  products,
-  serviceHighlights,
-  trendingSearches,
-  type DepartmentId,
-  type Product,
+import { createOrder, fetchProducts, fetchStorefront, requestBagQuote } from './api'
+import type {
+  DepartmentId,
+  Product,
+  QuoteRequestItem,
+  QuoteResponse,
+  QuoteSummary,
+  StoreSettings,
+  StorefrontResponse,
 } from './storefront'
 
 type DepartmentFilter = DepartmentId | 'all'
 type SortOption = 'featured' | 'price-low' | 'price-high' | 'rating' | 'deal'
+type LoadState = 'loading' | 'ready' | 'error'
 type BagRecord = Record<string, number>
 type BagLine = {
   product: Product
@@ -36,34 +35,30 @@ type ProductCardProps = {
   onAddToBag: (productId: string) => void
 }
 
+type PageStateProps = {
+  title: string
+  copy: string
+  actionLabel?: string
+  onAction?: () => void
+}
+
 const BAG_STORAGE_KEY = 'nyra-jewellery.bag.v1'
-const FREE_INSURED_SHIPPING_THRESHOLD = 15_000
-const STANDARD_INSURED_SHIPPING = 350
+const EMPTY_SUMMARY: QuoteSummary = {
+  itemCount: 0,
+  subtotal: 0,
+  shipping: 0,
+  vat: 0,
+  total: 0,
+  savings: 0,
+  freeShippingRemaining: 0,
+  shippingProgress: 0,
+}
 
 const priceFormatter = new Intl.NumberFormat('en-NP', {
   style: 'currency',
   currency: 'NPR',
   maximumFractionDigits: 0,
 })
-
-const departmentMap = new Map(departments.map((department) => [department.id, department]))
-
-const departmentFilters: Array<{
-  id: DepartmentFilter
-  label: string
-  blurb: string
-}> = [
-  {
-    id: 'all',
-    label: 'All collections',
-    blurb: 'Browse Nyra across gold, silver, diamond, bridal, heritage, gifting, and everyday Nepali jewellery.',
-  },
-  ...departments.map((department) => ({
-    id: department.id,
-    label: department.label,
-    blurb: department.blurb,
-  })),
-]
 
 const sortOptions: Array<{ value: SortOption; label: string }> = [
   { value: 'featured', label: 'Curated first' },
@@ -157,10 +152,10 @@ function compareProducts(left: Product, right: Product, sortOption: SortOption) 
   )
 }
 
-function buildBagLines(bag: BagRecord): BagLine[] {
+function buildBagLines(bag: BagRecord, catalog: Product[]): BagLine[] {
   return Object.entries(bag)
     .map(([productId, quantity]) => {
-      const product = products.find((item) => item.id === productId)
+      const product = catalog.find((item) => item.id === productId)
 
       if (!product || quantity <= 0) {
         return null
@@ -172,6 +167,49 @@ function buildBagLines(bag: BagRecord): BagLine[] {
       }
     })
     .filter((line): line is BagLine => line !== null)
+}
+
+function buildFallbackSummary(bagLines: BagLine[], settings: StoreSettings | null): QuoteSummary {
+  if (!settings) {
+    return EMPTY_SUMMARY
+  }
+
+  const itemCount = bagLines.reduce((total, line) => total + line.quantity, 0)
+  const subtotal = bagLines.reduce((total, line) => total + line.product.price * line.quantity, 0)
+  const savings = bagLines.reduce(
+    (total, line) => total + getDiscountAmount(line.product) * line.quantity,
+    0,
+  )
+  const shipping =
+    itemCount === 0
+      ? 0
+      : subtotal >= settings.freeInsuredShippingThreshold
+        ? 0
+        : settings.standardInsuredShipping
+  const vat = Math.round(subtotal * settings.vatRate)
+  const total = subtotal + shipping + vat
+  const freeShippingRemaining = Math.max(0, settings.freeInsuredShippingThreshold - subtotal)
+  const shippingProgress = Math.min(100, (subtotal / settings.freeInsuredShippingThreshold) * 100)
+
+  return {
+    itemCount,
+    subtotal,
+    shipping,
+    vat,
+    total,
+    savings,
+    freeShippingRemaining,
+    shippingProgress,
+  }
+}
+
+function createQuoteItems(bag: BagRecord): QuoteRequestItem[] {
+  return Object.entries(bag)
+    .filter(([, quantity]) => quantity > 0)
+    .map(([productId, quantity]) => ({
+      productId,
+      quantity,
+    }))
 }
 
 function ProductArt({ product, variant = 'card' }: ProductArtProps) {
@@ -288,32 +326,74 @@ function ProductCard({
   )
 }
 
+function PageState({ title, copy, actionLabel, onAction }: PageStateProps) {
+  return (
+    <div className="page-state">
+      <div className="page-state__panel">
+        <img src={nyraLogo} alt="Nyra logo" />
+        <h1>{title}</h1>
+        <p>{copy}</p>
+        {actionLabel && onAction ? (
+          <button type="button" className="button button--primary" onClick={onAction}>
+            {actionLabel}
+          </button>
+        ) : null}
+      </div>
+    </div>
+  )
+}
+
 function App() {
   const [searchQuery, setSearchQuery] = useState('')
   const [sortOption, setSortOption] = useState<SortOption>('featured')
   const [activeDepartment, setActiveDepartment] = useState<DepartmentFilter>('all')
-  const [selectedProductId, setSelectedProductId] = useState(products[0]?.id ?? '')
+  const [selectedProductId, setSelectedProductId] = useState('')
   const [bag, setBag] = useState<BagRecord>(() => readStoredBag())
   const [isBagOpen, setBagOpen] = useState(false)
+  const [storefront, setStorefront] = useState<StorefrontResponse | null>(null)
+  const [loadState, setLoadState] = useState<LoadState>('loading')
+  const [loadError, setLoadError] = useState<string | null>(null)
+  const [reloadToken, setReloadToken] = useState(0)
+  const [catalogProducts, setCatalogProducts] = useState<Product[]>([])
+  const [isCatalogLoading, setCatalogLoading] = useState(false)
+  const [catalogError, setCatalogError] = useState<string | null>(null)
+  const [quote, setQuote] = useState<QuoteResponse | null>(null)
+  const [isQuoteLoading, setQuoteLoading] = useState(false)
+  const [quoteError, setQuoteError] = useState<string | null>(null)
+  const [isCheckingOut, setCheckingOut] = useState(false)
+  const [checkoutMessage, setCheckoutMessage] = useState<string | null>(null)
 
   const deferredSearchQuery = useDeferredValue(searchQuery.trim().toLowerCase())
 
-  const filteredProducts = [...products]
-    .filter((product) => {
-      const matchesDepartment =
-        activeDepartment === 'all' ? true : product.department === activeDepartment
+  useEffect(() => {
+    const controller = new AbortController()
 
-      if (!matchesDepartment) {
-        return false
-      }
+    setLoadState('loading')
+    setLoadError(null)
 
-      if (!deferredSearchQuery) {
-        return true
-      }
+    fetchStorefront(controller.signal)
+      .then((data) => {
+        if (controller.signal.aborted) {
+          return
+        }
 
-      return getSearchHaystack(product).includes(deferredSearchQuery)
-    })
-    .sort((left, right) => compareProducts(left, right, sortOption))
+        startTransition(() => {
+          setStorefront(data)
+          setCatalogProducts(data.products)
+          setLoadState('ready')
+        })
+      })
+      .catch((error: unknown) => {
+        if (controller.signal.aborted) {
+          return
+        }
+
+        setLoadState('error')
+        setLoadError(error instanceof Error ? error.message : 'Unable to load storefront data.')
+      })
+
+    return () => controller.abort()
+  }, [reloadToken])
 
   useEffect(() => {
     if (typeof window === 'undefined') {
@@ -335,6 +415,95 @@ function App() {
     }
   }, [isBagOpen])
 
+  const navigationLinks = storefront?.navigationLinks ?? []
+  const trendingSearches = storefront?.trendingSearches ?? []
+  const departments = storefront?.departments ?? []
+  const serviceHighlights = storefront?.serviceHighlights ?? []
+  const editorialCollections = storefront?.editorialCollections ?? []
+  const checkoutSteps = storefront?.checkoutSteps ?? []
+  const footerColumns = storefront?.footerColumns ?? []
+  const allProducts = storefront?.products ?? []
+  const settings = storefront?.settings ?? null
+
+  const departmentMap = new Map(departments.map((department) => [department.id, department]))
+
+  const departmentFilters: Array<{
+    id: DepartmentFilter
+    label: string
+    blurb: string
+  }> = [
+    {
+      id: 'all',
+      label: 'All collections',
+      blurb: 'Browse Nyra across gold, silver, diamond, bridal, heritage, gifting, and everyday Nepali jewellery.',
+    },
+    ...departments.map((department) => ({
+      id: department.id,
+      label: department.label,
+      blurb: department.blurb,
+    })),
+  ]
+
+  const fallbackProducts = [...allProducts]
+    .filter((product) => {
+      const matchesDepartment =
+        activeDepartment === 'all' ? true : product.department === activeDepartment
+
+      if (!matchesDepartment) {
+        return false
+      }
+
+      if (!deferredSearchQuery) {
+        return true
+      }
+
+      return getSearchHaystack(product).includes(deferredSearchQuery)
+    })
+    .sort((left, right) => compareProducts(left, right, sortOption))
+
+  const filteredProducts = catalogError ? fallbackProducts : catalogProducts
+
+  useEffect(() => {
+    if (!storefront) {
+      return
+    }
+
+    const controller = new AbortController()
+
+    setCatalogLoading(true)
+    setCatalogError(null)
+
+    fetchProducts(
+      {
+        department: activeDepartment,
+        q: deferredSearchQuery,
+        sort: sortOption,
+      },
+      controller.signal,
+    )
+      .then((payload) => {
+        if (!controller.signal.aborted) {
+          setCatalogProducts(payload.items)
+        }
+      })
+      .catch((error: unknown) => {
+        if (controller.signal.aborted) {
+          return
+        }
+
+        setCatalogError(
+          error instanceof Error ? error.message : 'Unable to load catalog results from the backend.',
+        )
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) {
+          setCatalogLoading(false)
+        }
+      })
+
+    return () => controller.abort()
+  }, [activeDepartment, deferredSearchQuery, sortOption, storefront])
+
   useEffect(() => {
     if (filteredProducts.length === 0) {
       return
@@ -344,25 +513,61 @@ function App() {
       (product) => product.id === selectedProductId,
     )
 
-    if (!selectedProductStillVisible) {
+    if (!selectedProductId || !selectedProductStillVisible) {
       setSelectedProductId(filteredProducts[0].id)
     }
   }, [filteredProducts, selectedProductId])
 
-  const bagLines = buildBagLines(bag)
-  const bagItemCount = bagLines.reduce((total, line) => total + line.quantity, 0)
-  const subtotal = bagLines.reduce((total, line) => total + line.product.price * line.quantity, 0)
-  const shipping =
-    bagItemCount === 0
-      ? 0
-      : subtotal >= FREE_INSURED_SHIPPING_THRESHOLD
-        ? 0
-        : STANDARD_INSURED_SHIPPING
-  const vat = subtotal * 0.13
-  const total = subtotal + shipping + vat
-  const freeShippingRemaining = Math.max(0, FREE_INSURED_SHIPPING_THRESHOLD - subtotal)
-  const shippingProgress = Math.min(100, (subtotal / FREE_INSURED_SHIPPING_THRESHOLD) * 100)
+  const bagLines = buildBagLines(bag, allProducts)
 
+  useEffect(() => {
+    if (!storefront) {
+      return
+    }
+
+    const quoteItems = createQuoteItems(bag)
+
+    if (quoteItems.length === 0) {
+      setQuote({
+        currency: settings?.currency ?? 'NPR',
+        lines: [],
+        summary: EMPTY_SUMMARY,
+      })
+      setQuoteError(null)
+      setQuoteLoading(false)
+      return
+    }
+
+    const controller = new AbortController()
+
+    setQuoteLoading(true)
+    setQuoteError(null)
+
+    requestBagQuote(quoteItems, controller.signal)
+      .then((payload) => {
+        if (!controller.signal.aborted) {
+          setQuote(payload)
+        }
+      })
+      .catch((error: unknown) => {
+        if (controller.signal.aborted) {
+          return
+        }
+
+        setQuoteError(error instanceof Error ? error.message : 'Unable to quote the current bag.')
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) {
+          setQuoteLoading(false)
+        }
+      })
+
+    return () => controller.abort()
+  }, [bag, settings?.currency, storefront])
+
+  const fallbackSummary = buildFallbackSummary(bagLines, settings)
+  const activeSummary = quote?.summary ?? fallbackSummary
+  const bagItemCount = activeSummary.itemCount
   const selectedProduct =
     filteredProducts.length === 0
       ? undefined
@@ -377,15 +582,20 @@ function App() {
       : departmentFilters.find((department) => department.id === activeDepartment) ?? departmentFilters[0]
 
   const featuredDepartments = departments.slice(0, 4)
-  const topDeals = [...products]
+  const topDeals = [...allProducts]
     .sort((left, right) => compareProducts(left, right, 'deal'))
     .slice(0, 2)
-  const recommendations = products
+  const recommendations = allProducts
     .filter((product) => !bag[product.id])
     .sort((left, right) => compareProducts(left, right, 'featured'))
     .slice(0, 2)
 
+  function retryLoad() {
+    setReloadToken((currentValue) => currentValue + 1)
+  }
+
   function handleAddToBag(productId: string) {
+    setCheckoutMessage(null)
     setBag((currentBag) => ({
       ...currentBag,
       [productId]: (currentBag[productId] ?? 0) + 1,
@@ -394,6 +604,7 @@ function App() {
   }
 
   function handleQuantityChange(productId: string, delta: number) {
+    setCheckoutMessage(null)
     setBag((currentBag) => {
       const nextQuantity = (currentBag[productId] ?? 0) + delta
 
@@ -411,6 +622,7 @@ function App() {
   }
 
   function handleRemoveFromBag(productId: string) {
+    setCheckoutMessage(null)
     setBag((currentBag) => {
       const nextBag = { ...currentBag }
       delete nextBag[productId]
@@ -444,6 +656,47 @@ function App() {
     handleSortChange('featured')
   }
 
+  async function handleCheckout() {
+    const orderItems = createQuoteItems(bag)
+
+    if (isCheckingOut || orderItems.length === 0) {
+      return
+    }
+
+    setCheckingOut(true)
+    setCheckoutMessage(null)
+
+    try {
+      const order = await createOrder(orderItems)
+      setCheckoutMessage(`Dummy order ${order.orderId} created successfully.`)
+      setBag({})
+    } catch (error) {
+      setCheckoutMessage(error instanceof Error ? error.message : 'Unable to create the demo order.')
+    } finally {
+      setCheckingOut(false)
+    }
+  }
+
+  if (loadState === 'loading' && !storefront) {
+    return (
+      <PageState
+        title="Loading Nyra storefront"
+        copy="Connecting the jewellery app to the local mock API and dummy database."
+      />
+    )
+  }
+
+  if (loadState === 'error' && !storefront) {
+    return (
+      <PageState
+        title="Storefront unavailable"
+        copy={loadError ?? 'The frontend could not load the dummy backend data.'}
+        actionLabel="Retry connection"
+        onAction={retryLoad}
+      />
+    )
+  }
+
   return (
     <>
       <div className="storefront">
@@ -453,7 +706,7 @@ function App() {
               <img className="brand-lockup__image" src={nyraLogo} alt="Nyra logo" />
               <span className="brand-lockup__copy">
                 <strong>Nyra</strong>
-                <span>Nepali Jewellery House</span>
+                <span>Mock API powered storefront</span>
               </span>
             </a>
 
@@ -466,7 +719,7 @@ function App() {
             </nav>
 
             <div className="topbar__actions">
-              <span className="status-pill">Insured delivery across Nepal</span>
+              <span className="status-pill">Dummy DB + local API connected</span>
               <button type="button" className="bag-button" onClick={() => setBagOpen(true)}>
                 <span>Bag</span>
                 <strong>{bagItemCount}</strong>
@@ -476,14 +729,30 @@ function App() {
         </header>
 
         <main className="page-shell">
+          {quoteError ? (
+            <div className="system-banner system-banner--warning">
+              Quote API is unavailable, so pricing is temporarily using the frontend fallback.
+            </div>
+          ) : null}
+
+          {catalogError ? (
+            <div className="system-banner system-banner--warning">
+              Catalogue API is unavailable, so filters are temporarily using the storefront fallback.
+            </div>
+          ) : null}
+
+          {checkoutMessage ? (
+            <div className="system-banner system-banner--success">{checkoutMessage}</div>
+          ) : null}
+
           <section className="hero" id="home">
             <div className="hero__copy">
-              <p className="section-label">Fine jewellery for Nepal</p>
-              <h1>Elegant gold, silver, and diamond pieces with a cleaner shopping experience.</h1>
+              <p className="section-label">Production-style mock commerce stack</p>
+              <h1>Elegant gold, silver, and diamond pieces with a real local backend.</h1>
               <p className="hero__description">
-                Nyra is designed as a jewellery-first storefront for Nepali buyers, with stronger
-                brand presence, simpler browsing, and product detail panels that feel more premium
-                and easier to shop.
+                The catalogue, merchandising, and quote calculations are now loaded from a local
+                API backed by a dummy JSON database, so the app behaves more like a production
+                storefront than a static front-end demo.
               </p>
 
               <form className="hero-search" onSubmit={handleSearchSubmit}>
@@ -546,8 +815,8 @@ function App() {
               <article className="logo-showcase">
                 <img className="logo-showcase__image" src={nyraLogo} alt="Nyra brand logo" />
                 <div className="logo-showcase__caption">
-                  <span>Nyra Signature</span>
-                  <strong>Gold, silver, and diamond collections with a refined Nepali identity.</strong>
+                  <span>Backend ready demo</span>
+                  <strong>Catalog data, quote totals, and demo checkout now come from the local API layer.</strong>
                 </div>
               </article>
             </div>
@@ -612,6 +881,10 @@ function App() {
                     Reset filters
                   </button>
                 </div>
+
+                {isCatalogLoading ? (
+                  <p className="inline-note">Syncing catalogue filters with the local API...</p>
+                ) : null}
 
                 <div className="filter-row">
                   {departmentFilters.map((department) => (
@@ -725,32 +998,42 @@ function App() {
                 <div className="summary-rows">
                   <div>
                     <span>Subtotal</span>
-                    <strong>{formatPrice(subtotal)}</strong>
+                    <strong>{formatPrice(activeSummary.subtotal)}</strong>
                   </div>
                   <div>
                     <span>Insured shipping</span>
-                    <strong>{shipping === 0 ? 'Free' : formatPrice(shipping)}</strong>
+                    <strong>
+                      {activeSummary.shipping === 0 ? 'Free' : formatPrice(activeSummary.shipping)}
+                    </strong>
                   </div>
                   <div>
                     <span>Estimated VAT</span>
-                    <strong>{formatPrice(vat)}</strong>
+                    <strong>{formatPrice(activeSummary.vat)}</strong>
+                  </div>
+                  <div>
+                    <span>Current savings</span>
+                    <strong>{formatPrice(activeSummary.savings)}</strong>
                   </div>
                   <div className="summary-rows__total">
                     <span>Total</span>
-                    <strong>{formatPrice(total)}</strong>
+                    <strong>{formatPrice(activeSummary.total)}</strong>
                   </div>
                 </div>
 
                 <div className="progress-card">
                   <p>
-                    {freeShippingRemaining > 0
-                      ? `Add ${formatPrice(freeShippingRemaining)} more for free insured shipping.`
+                    {activeSummary.freeShippingRemaining > 0
+                      ? `Add ${formatPrice(activeSummary.freeShippingRemaining)} more for free insured shipping.`
                       : 'Your bag already qualifies for free insured shipping.'}
                   </p>
                   <div className="progress-bar" aria-hidden="true">
-                    <span style={{ width: `${shippingProgress}%` }} />
+                    <span style={{ width: `${activeSummary.shippingProgress}%` }} />
                   </div>
                 </div>
+
+                {isQuoteLoading ? (
+                  <p className="inline-note">Refreshing totals from the backend quote service...</p>
+                ) : null}
 
                 <div className="recommendation-stack">
                   {recommendations.map((product) => (
@@ -769,7 +1052,7 @@ function App() {
 
               <section className="sidebar-card sidebar-card--steps" id="checkout">
                 <p className="section-label">Purchase flow</p>
-                <h2>Clear and premium from browse to checkout</h2>
+                <h2>Mock backend, real app structure</h2>
                 <div className="checkout-steps">
                   {checkoutSteps.map((step) => (
                     <div key={step.step} className="checkout-step">
@@ -810,8 +1093,8 @@ function App() {
               <p className="section-label">Nyra</p>
               <h2>Jewellery experience refined for Nepal.</h2>
               <p>
-                A cleaner storefront for bridal, heritage, gifting, and fine jewellery with a
-                stronger luxury presentation.
+                A cleaner storefront backed by a dummy JSON database, local REST API, and demo
+                order flow that is easier to extend into a real production stack.
               </p>
             </div>
           </div>
@@ -897,22 +1180,33 @@ function App() {
                 <div className="bag-drawer__summary">
                   <div>
                     <span>Subtotal</span>
-                    <strong>{formatPrice(subtotal)}</strong>
+                    <strong>{formatPrice(activeSummary.subtotal)}</strong>
                   </div>
                   <div>
                     <span>Insured shipping</span>
-                    <strong>{shipping === 0 ? 'Free' : formatPrice(shipping)}</strong>
+                    <strong>
+                      {activeSummary.shipping === 0 ? 'Free' : formatPrice(activeSummary.shipping)}
+                    </strong>
                   </div>
                   <div>
                     <span>Estimated VAT</span>
-                    <strong>{formatPrice(vat)}</strong>
+                    <strong>{formatPrice(activeSummary.vat)}</strong>
+                  </div>
+                  <div>
+                    <span>Savings</span>
+                    <strong>{formatPrice(activeSummary.savings)}</strong>
                   </div>
                   <div className="bag-drawer__total">
                     <span>Total</span>
-                    <strong>{formatPrice(total)}</strong>
+                    <strong>{formatPrice(activeSummary.total)}</strong>
                   </div>
-                  <button type="button" className="button button--primary button--full">
-                    Checkout with eSewa / card
+                  <button
+                    type="button"
+                    className="button button--primary button--full"
+                    onClick={handleCheckout}
+                    disabled={isCheckingOut}
+                  >
+                    {isCheckingOut ? 'Creating demo order...' : 'Checkout with eSewa / card'}
                   </button>
                 </div>
               </div>
@@ -920,7 +1214,7 @@ function App() {
               <div className="empty-bag">
                 <img src={nyraLogo} alt="Nyra logo" />
                 <h3>Your bag is empty.</h3>
-                <p>Add a Nyra piece to preview the cleaner bag and checkout experience.</p>
+                <p>Add a Nyra piece to preview the mock checkout flow and dummy backend totals.</p>
               </div>
             )}
           </aside>
