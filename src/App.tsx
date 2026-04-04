@@ -668,10 +668,10 @@ function App() {
 
     try {
       const order = await createOrder(orderItems)
-      setCheckoutMessage(`Dummy order ${order.orderId} created successfully.`)
+      setCheckoutMessage(`Order request ${order.orderId} created successfully.`)
       setBag({})
     } catch (error) {
-      setCheckoutMessage(error instanceof Error ? error.message : 'Unable to create the demo order.')
+      setCheckoutMessage(error instanceof Error ? error.message : 'Unable to place the order right now.')
     } finally {
       setCheckingOut(false)
     }
@@ -680,8 +680,8 @@ function App() {
   if (loadState === 'loading' && !storefront) {
     return (
       <PageState
-        title="Loading Nyra storefront"
-        copy="Connecting the jewellery app to the local mock API and dummy database."
+        title="Preparing the Nyra collection"
+        copy="Loading the latest catalogue, offers, and delivery details for the Nyra storefront."
       />
     )
   }
@@ -690,8 +690,8 @@ function App() {
     return (
       <PageState
         title="Storefront unavailable"
-        copy={loadError ?? 'The frontend could not load the dummy backend data.'}
-        actionLabel="Retry connection"
+        copy={loadError ?? 'We could not load the Nyra collection right now. Please try again.'}
+        actionLabel="Try again"
         onAction={retryLoad}
       />
     )
@@ -706,7 +706,7 @@ function App() {
               <img className="brand-lockup__image" src={nyraLogo} alt="Nyra logo" />
               <span className="brand-lockup__copy">
                 <strong>Nyra</strong>
-                <span>Mock API powered storefront</span>
+                <span>Fine jewellery for Nepal</span>
               </span>
             </a>
 
@@ -719,7 +719,7 @@ function App() {
             </nav>
 
             <div className="topbar__actions">
-              <span className="status-pill">Dummy DB + local API connected</span>
+              <span className="status-pill">Crafted for Nepal</span>
               <button type="button" className="bag-button" onClick={() => setBagOpen(true)}>
                 <span>Bag</span>
                 <strong>{bagItemCount}</strong>
@@ -731,13 +731,13 @@ function App() {
         <main className="page-shell">
           {quoteError ? (
             <div className="system-banner system-banner--warning">
-              Quote API is unavailable, so pricing is temporarily using the frontend fallback.
+              Live totals are temporarily refreshing. Displayed pricing is still available.
             </div>
           ) : null}
 
           {catalogError ? (
             <div className="system-banner system-banner--warning">
-              Catalogue API is unavailable, so filters are temporarily using the storefront fallback.
+              Some collection filters are temporarily limited while the catalogue refreshes.
             </div>
           ) : null}
 
@@ -747,12 +747,11 @@ function App() {
 
           <section className="hero" id="home">
             <div className="hero__copy">
-              <p className="section-label">Production-style mock commerce stack</p>
-              <h1>Elegant gold, silver, and diamond pieces with a real local backend.</h1>
+              <p className="section-label">Nyra Signature</p>
+              <h1>Elegant gold, silver, and diamond jewellery for Nepal.</h1>
               <p className="hero__description">
-                The catalogue, merchandising, and quote calculations are now loaded from a local
-                API backed by a dummy JSON database, so the app behaves more like a production
-                storefront than a static front-end demo.
+                Discover bridal heirlooms, refined daily wear, and gift-ready pieces shaped for
+                Nepali celebrations, modern styling, and trusted craftsmanship.
               </p>
 
               <form className="hero-search" onSubmit={handleSearchSubmit}>
@@ -815,8 +814,11 @@ function App() {
               <article className="logo-showcase">
                 <img className="logo-showcase__image" src={nyraLogo} alt="Nyra brand logo" />
                 <div className="logo-showcase__caption">
-                  <span>Backend ready demo</span>
-                  <strong>Catalog data, quote totals, and demo checkout now come from the local API layer.</strong>
+                  <span>Heritage meets refinement</span>
+                  <strong>
+                    A jewellery storefront designed to feel premium, polished, and ready for
+                    modern Nepali shoppers.
+                  </strong>
                 </div>
               </article>
             </div>
@@ -882,9 +884,7 @@ function App() {
                   </button>
                 </div>
 
-                {isCatalogLoading ? (
-                  <p className="inline-note">Syncing catalogue filters with the local API...</p>
-                ) : null}
+                {isCatalogLoading ? <p className="inline-note">Refreshing collection results...</p> : null}
 
                 <div className="filter-row">
                   {departmentFilters.map((department) => (
@@ -1052,7 +1052,7 @@ function App() {
 
               <section className="sidebar-card sidebar-card--steps" id="checkout">
                 <p className="section-label">Purchase flow</p>
-                <h2>Mock backend, real app structure</h2>
+                <h2>Designed for confident checkout</h2>
                 <div className="checkout-steps">
                   {checkoutSteps.map((step) => (
                     <div key={step.step} className="checkout-step">
@@ -1093,8 +1093,8 @@ function App() {
               <p className="section-label">Nyra</p>
               <h2>Jewellery experience refined for Nepal.</h2>
               <p>
-                A cleaner storefront backed by a dummy JSON database, local REST API, and demo
-                order flow that is easier to extend into a real production stack.
+                A premium storefront experience for gold, silver, and diamond collections,
+                designed to be elegant today and extensible as the business grows.
               </p>
             </div>
           </div>
@@ -1206,7 +1206,7 @@ function App() {
                     onClick={handleCheckout}
                     disabled={isCheckingOut}
                   >
-                    {isCheckingOut ? 'Creating demo order...' : 'Checkout with eSewa / card'}
+                    {isCheckingOut ? 'Placing order...' : 'Checkout with eSewa / card'}
                   </button>
                 </div>
               </div>
@@ -1214,7 +1214,7 @@ function App() {
               <div className="empty-bag">
                 <img src={nyraLogo} alt="Nyra logo" />
                 <h3>Your bag is empty.</h3>
-                <p>Add a Nyra piece to preview the mock checkout flow and dummy backend totals.</p>
+                <p>Add a Nyra piece to review pricing, delivery, and checkout details.</p>
               </div>
             )}
           </aside>

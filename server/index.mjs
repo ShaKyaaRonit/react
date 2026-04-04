@@ -119,7 +119,7 @@ const server = createServer(async (request, response) => {
     if (request.method === 'GET' && pathname === '/api/health') {
       sendJson(response, 200, {
         ok: true,
-        service: 'nyra-mock-api',
+        service: 'nyra-store-api',
         environment: process.env.NODE_ENV ?? 'development',
       })
       return
@@ -189,7 +189,7 @@ server.listen(port, host, () => {
   const label =
     process.env.NODE_ENV === 'production'
       ? `Nyra app and API available on http://${host}:${port}`
-      : `Nyra mock API listening on http://${host}:${port}`
+      : `Nyra API listening on http://${host}:${port}`
 
   console.log(label)
 })

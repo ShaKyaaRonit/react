@@ -106,7 +106,7 @@ export function buildQuote(items) {
     const product = productsById.get(item.productId)
 
     if (!product) {
-      throw new Error(`Product "${item.productId}" was not found in the dummy database.`)
+      throw new Error(`Product "${item.productId}" was not found in the Nyra catalogue database.`)
     }
 
     return {
